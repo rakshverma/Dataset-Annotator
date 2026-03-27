@@ -1,0 +1,130 @@
+import { GoogleGenAI } from "@google/genai";
+import { getUser, unauthorized } from "@/lib/auth";
+
+const GEMINI_MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash-preview-05-20"];
+
+function getClient() {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY not set");
+  return new GoogleGenAI({ apiKey: key });
+}
+
+export async function POST(request) {
+  const user = await getUser(request);
+  if (!user) return unauthorized();
+
+  try {
+    const {
+      objective,
+      qtype = 1,
+      dataset_id = "auto",
+      grounding_sources = [],
+      model = "gemini-3-flash-preview",
+      existing_concepts = [],
+      selected_concepts = [],
+    } = await request.json();
+
+    if (!objective?.trim()) {
+      return Response.json({ error: "Objective is required" }, { status: 400 });
+    }
+
+    const qtypeHint = {
+      0: "MCQ — set choices=[A,B,C,D text], A/B/C/D fields, answer=letter",
+      1: "QA — open answer, choices=[], A=B=C=D=''",
+      2: "Multi-step reasoning — step-by-step, choices=[], A=B=C=D=''",
+    }[qtype] || "QA";
+
+    const groundingBlob = grounding_sources
+      .map((s) => `SOURCE: ${s.source_type}\nREF: ${s.source_ref || ""}\n${s.source_text || ""}`)
+      .join("\n\n");
+
+    const hasWiki = grounding_sources.some((s) => s.source_type?.startsWith("wiki"));
+    const hasSoGt = grounding_sources.some((s) => s.source_type === "so_ground_truth");
+
+    const wikiInstr = hasWiki
+      ? "IMPORTANT: Wiki documents are included. MUST verify every claim against them.\n\n"
+      : "";
+    const soInstr = hasSoGt
+      ? "IMPORTANT: Stack Overflow Q&As are GROUND TRUTH. Align answer with SO answers.\n\n"
+      : "";
+
+    // Build concept registry instruction
+    let conceptInstr = "";
+    if (existing_concepts.length > 0) {
+      const conceptList = existing_concepts.map((c) => c.concept || c).join(", ");
+      conceptInstr = `\nCONCEPT REGISTRY (already used concepts — DO NOT repeat these, pick new/different ones):\n${conceptList}\n\n`;
+    }
+    if (selected_concepts.length > 0) {
+      const selectedList = selected_concepts.join(", ");
+      conceptInstr += `MUST-INCLUDE CONCEPTS (user selected these — include in concept_coverage):\n${selectedList}\n\n`;
+    }
+
+    const prompt = `You are helping build a high-quality ITOps dataset. Return exactly one JSON object: id, question, choices, qtype, answer, solution, reasoning_thought, concept_coverage, A, B, C, D. qtype: 0=MCQ, 1=QA, 2=multi-step. If not MCQ, choices=[] and A/B/C/D=''. concept_coverage must be a non-empty array of NEW concepts not already in the registry. No markdown, no extra text.
+
+${soInstr}${wikiInstr}${conceptInstr}TARGET_QTYPE: ${qtype} (${qtypeHint})
+PREFERRED_ID: ${dataset_id}
+USER_OBJECTIVE:
+${objective}
+
+GROUNDING_CONTENT:
+${groundingBlob.slice(0, 18000)}`;
+
+    const client = getClient();
+    const response = await client.models.generateContent({
+      model,
+      contents: prompt,
+    });
+
+    const rawText = response.text || "";
+    if (!rawText.trim()) {
+      return Response.json({ error: "Gemini returned empty response" }, { status: 500 });
+    }
+
+    // Extract JSON from response
+    let parsed;
+    const jsonStart = rawText.indexOf("{");
+    const jsonEnd = rawText.lastIndexOf("}");
+
+    if (jsonStart !== -1 && jsonEnd > jsonStart) {
+      try {
+        parsed = JSON.parse(rawText.slice(jsonStart, jsonEnd + 1));
+      } catch {
+        // Try repair
+        let candidate = rawText.slice(jsonStart);
+        let depth = 0;
+        let inStr = false;
+        for (const ch of candidate) {
+          if (ch === '"' && !inStr) inStr = true;
+          else if (ch === '"' && inStr) inStr = false;
+          if (!inStr) {
+            if (ch === '{') depth++;
+            if (ch === '}') depth--;
+          }
+        }
+        candidate += "}".repeat(Math.max(0, depth));
+        parsed = JSON.parse(candidate);
+      }
+    } else {
+      return Response.json({ error: "No JSON in AI response", raw: rawText.slice(0, 500) }, { status: 500 });
+    }
+
+    // Fill defaults
+    const defaults = {
+      id: "auto", question: "", qtype: 0, choices: [],
+      answer: "", solution: "", reasoning_thought: "",
+      concept_coverage: [], grounding: [],
+      A: "", B: "", C: "", D: ""
+    };
+    const result = { ...defaults, ...parsed, qtype };
+
+    if (!Array.isArray(result.concept_coverage)) {
+      result.concept_coverage = result.concept_coverage ? [String(result.concept_coverage)] : [];
+    }
+    if (!Array.isArray(result.choices)) result.choices = [];
+
+    return Response.json({ draft: result, model, raw_length: rawText.length });
+  } catch (err) {
+    console.error("Generate error:", err);
+    return Response.json({ error: err.message }, { status: 500 });
+  }
+}

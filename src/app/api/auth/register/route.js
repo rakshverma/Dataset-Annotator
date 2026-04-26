@@ -1,8 +1,9 @@
-import { query, queryOne } from "@/lib/db";
+import { initTables, query, queryOne } from "@/lib/db";
 import { hashPassword, signToken } from "@/lib/auth";
 
 export async function POST(request) {
   try {
+    await initTables();
     const { username, password } = await request.json();
     if (!username?.trim() || !password?.trim()) {
       return Response.json({ error: "Username and password required" }, { status: 400 });

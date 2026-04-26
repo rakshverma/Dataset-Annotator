@@ -1,11 +1,13 @@
-import { query, queryOne } from "@/lib/db";
+import { getDbBackend, initTables, query, queryOne } from "@/lib/db";
 import { getUser, unauthorized } from "@/lib/auth";
 import { chunkText } from "@/lib/chunker";
-import { embedBatch } from "@/lib/embeddings";
+import { embedBatch, embeddingToDbValue } from "@/lib/embeddings";
+import { removeVectorsByDocAndSource, upsertChunkVector } from "@/lib/sqlite_vec";
 
 export async function GET(request) {
   const user = await getUser(request);
   if (!user) return unauthorized();
+  await initTables();
 
   const { searchParams } = new URL(request.url);
   const search = searchParams.get("search");
@@ -35,8 +37,9 @@ export async function POST(request) {
   if (!user) return unauthorized();
 
   try {
+    await initTables();
     const body = await request.json();
-    const { title, tags = "", source_ref = "", content_text } = body;
+    const { title, tags = "", source_ref = "", content_text, embed_model, embed_provider } = body;
 
     if (!title?.trim() || !content_text?.trim()) {
       return Response.json({ error: "Title and content required" }, { status: 400 });
@@ -55,12 +58,21 @@ export async function POST(request) {
     // Auto-embed into pgvector
     let chunksStored = 0;
     try {
+      const backend = getDbBackend();
       const chunks = chunkText(truncated, title.trim());
       if (chunks.length > 0) {
-        const embeddings = await embedBatch(chunks);
+        const embeddings = await embedBatch(chunks, {
+          model: embed_model,
+          provider: embed_provider,
+        });
         const prefix = `wiki_${wikiId}`;
 
         // Delete old chunks
+        try {
+          if (backend === "sqlite") removeVectorsByDocAndSource(String(wikiId), "wiki");
+        } catch (vecErr) {
+          console.warn("sqlite-vec cleanup skipped:", vecErr.message);
+        }
         await query("DELETE FROM document_chunks WHERE doc_id = $1 AND source = $2", [String(wikiId), "wiki"]);
 
         // Insert new
@@ -71,10 +83,25 @@ export async function POST(request) {
 
           await query(
             `INSERT INTO document_chunks (id, doc_id, source, title, tags, chunk_index, content, embedding, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9::jsonb)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata`,
-            [chunkId, String(wikiId), "wiki", title.trim(), tags.trim(), i, chunks[i], `[${embeddings[i].join(",")}]`, meta]
+            [
+              chunkId,
+              String(wikiId),
+              "wiki",
+              title.trim(),
+              tags.trim(),
+              i,
+              chunks[i],
+              embeddingToDbValue(embeddings[i], backend),
+              meta,
+            ]
           );
+          try {
+            if (backend === "sqlite") upsertChunkVector(chunkId, embeddings[i]);
+          } catch (vecErr) {
+            // vec0 index insert failed — chunk is still stored in document_chunks
+          }
           chunksStored++;
         }
       }

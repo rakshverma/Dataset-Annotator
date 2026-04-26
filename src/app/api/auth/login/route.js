@@ -1,4 +1,4 @@
-import { query, queryOne, getSQL } from "@/lib/db";
+import { initTables, queryOne } from "@/lib/db";
 import { verifyPassword, signToken } from "@/lib/auth";
 
 export async function POST(request) {
@@ -10,16 +10,8 @@ export async function POST(request) {
       return Response.json({ error: "Username and password required" }, { status: 400 });
     }
 
-    // Ensure users table exists (handles first-run)
-    const sql = getSQL();
-    await sql`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        username TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `;
+    // Ensure required tables exist (handles first-run for both Postgres and SQLite).
+    await initTables();
 
     const user = await queryOne(
       "SELECT id, username, password_hash FROM users WHERE username = $1",

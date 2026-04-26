@@ -2,6 +2,8 @@ import { GoogleGenAI } from "@google/genai";
 import { getUser, unauthorized } from "@/lib/auth";
 
 const GEMINI_MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash-preview-05-20"];
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+const OLLAMA_DEFAULT_MODEL = process.env.OLLAMA_GENERATE_MODEL || "gemma4:e4b";
 
 function getClient() {
   const key = process.env.GEMINI_API_KEY;
@@ -20,6 +22,7 @@ export async function POST(request) {
       dataset_id = "auto",
       grounding_sources = [],
       model = "gemini-3-flash-preview",
+      provider = "gemini",
       existing_concepts = [],
       selected_concepts = [],
     } = await request.json();
@@ -69,15 +72,39 @@ ${objective}
 GROUNDING_CONTENT:
 ${groundingBlob.slice(0, 18000)}`;
 
-    const client = getClient();
-    const response = await client.models.generateContent({
-      model,
-      contents: prompt,
-    });
+    const normalizedProvider = String(provider || "gemini").toLowerCase();
+    const selectedModel = model || (normalizedProvider === "ollama" ? OLLAMA_DEFAULT_MODEL : GEMINI_MODELS[0]);
 
-    const rawText = response.text || "";
+    let rawText = "";
+    if (normalizedProvider === "ollama") {
+      const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: selectedModel,
+          prompt,
+          stream: false,
+          options: {
+            temperature: 0.2,
+          },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Ollama generation failed: ${response.status}`);
+      }
+      const data = await response.json();
+      rawText = data?.response || "";
+    } else {
+      const client = getClient();
+      const response = await client.models.generateContent({
+        model: selectedModel,
+        contents: prompt,
+      });
+      rawText = response.text || "";
+    }
+
     if (!rawText.trim()) {
-      return Response.json({ error: "Gemini returned empty response" }, { status: 500 });
+      return Response.json({ error: `${normalizedProvider} returned empty response` }, { status: 500 });
     }
 
     // Extract JSON from response
@@ -122,7 +149,12 @@ ${groundingBlob.slice(0, 18000)}`;
     }
     if (!Array.isArray(result.choices)) result.choices = [];
 
-    return Response.json({ draft: result, model, raw_length: rawText.length });
+    return Response.json({
+      draft: result,
+      model: selectedModel,
+      provider: normalizedProvider,
+      raw_length: rawText.length,
+    });
   } catch (err) {
     console.error("Generate error:", err);
     return Response.json({ error: err.message }, { status: 500 });

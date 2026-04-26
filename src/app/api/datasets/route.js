@@ -1,9 +1,10 @@
-import { query, queryOne } from "@/lib/db";
+import { initTables, query, queryOne } from "@/lib/db";
 import { getUser, unauthorized } from "@/lib/auth";
 
 export async function GET(request) {
   const user = await getUser(request);
   if (!user) return unauthorized();
+  await initTables();
 
   const { searchParams } = new URL(request.url);
   const scope = searchParams.get("scope"); // "mine" or "all"
@@ -33,6 +34,7 @@ export async function POST(request) {
   if (!user) return unauthorized();
 
   try {
+    await initTables();
     const body = await request.json();
     const {
       title, account_label, task_type = "itops_reasoning",

@@ -9,6 +9,7 @@ export default function CreateEntryPage() {
   const [tab, setTab] = useState("manual");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState({ type: "", text: "" });
+  const [aiModelUsed, setAiModelUsed] = useState("manual_entry");
 
   // Form fields
   const [datasetId, setDatasetId] = useState("");
@@ -27,10 +28,15 @@ export default function CreateEntryPage() {
   // AI fields
   const [aiObjective, setAiObjective] = useState("");
   const [aiQtype, setAiQtype] = useState(1);
+  const [decoderProvider, setDecoderProvider] = useState("gemini");
+  const [decoderModel, setDecoderModel] = useState("gemini-3-flash-preview");
+  const [ollamaDecoderModels, setOllamaDecoderModels] = useState([]);
 
   // KB search
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
+  const [vectorProvider, setVectorProvider] = useState("gemini");
+  const [vectorModel, setVectorModel] = useState("gemini-embedding-001");
 
   // SO search
   const [soQuery, setSoQuery] = useState("");
@@ -48,7 +54,21 @@ export default function CreateEntryPage() {
   useEffect(() => {
     if (!isLoggedIn()) { router.replace("/login"); return; }
     apiJson("/api/concepts").then(setConceptRegistry).catch(() => {});
+    loadModelCatalog();
   }, [router]);
+
+  async function loadModelCatalog() {
+    try {
+      const catalog = await apiJson("/api/models");
+      const ollama = catalog?.decoder?.ollama || [];
+      setOllamaDecoderModels(ollama);
+      if (decoderProvider === "ollama" && ollama.length > 0 && !ollama.includes(decoderModel)) {
+        setDecoderModel(ollama[0]);
+      }
+    } catch {
+      // non-blocking
+    }
+  }
 
   /* ── Concept toggling ──────────────── */
   function toggleConcept(conceptName) {
@@ -133,7 +153,12 @@ export default function CreateEntryPage() {
     try {
       const results = await apiJson("/api/vectors/search", {
         method: "POST",
-        body: JSON.stringify({ query: searchQuery, n_results: 8 }),
+        body: JSON.stringify({
+          query: searchQuery,
+          n_results: 8,
+          embed_provider: vectorProvider,
+          embed_model: vectorModel,
+        }),
       });
       setSearchResults(results);
     } catch (err) {
@@ -200,6 +225,8 @@ export default function CreateEntryPage() {
         body: JSON.stringify({
           objective: aiObjective,
           qtype: aiQtype,
+          provider: decoderProvider,
+          model: decoderModel,
           grounding_sources: selectedSources,
           existing_concepts: conceptRegistry,   // ALL concepts always sent
           selected_concepts: currentConcepts,    // User-picked ones
@@ -227,6 +254,7 @@ export default function CreateEntryPage() {
         setChoiceD(draft.D || draft.choices?.[3] || "");
       }
       setTab("manual");
+      setAiModelUsed(`${data.provider || decoderProvider}:${data.model || decoderModel}`);
       setMsg({ type: "success", text: `Draft generated with ${data.model}. Review and save below.` });
     } catch (err) {
       setMsg({ type: "error", text: err.message });
@@ -277,7 +305,7 @@ export default function CreateEntryPage() {
           reasoning_trace: reasoning.trim(),
           ai_conclusion: solution.trim(),
           change_note: "Initial creation",
-          model_name: tab === "ai" ? "gemini-3-flash-preview" : "manual_entry",
+          model_name: aiModelUsed,
           sources: selectedSources,
           concept_coverage: conceptList,
         }),
@@ -289,6 +317,7 @@ export default function CreateEntryPage() {
       setDatasetId(""); setQuestion(""); setAnswer(""); setSolution("");
       setReasoning(""); setConcepts(""); setChoiceA(""); setChoiceB("");
       setChoiceC(""); setChoiceD(""); setSelectedSources([]);
+      setAiModelUsed("manual_entry");
     } catch (err) {
       setMsg({ type: "error", text: err.message });
     } finally {
@@ -338,6 +367,51 @@ export default function CreateEntryPage() {
                     <option value={1}>Open QA</option>
                     <option value={2}>Multi-step Reasoning</option>
                   </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Decoder Provider</label>
+                  <select
+                    className="form-select"
+                    value={decoderProvider}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setDecoderProvider(next);
+                      if (next === "gemini") {
+                        setDecoderModel("gemini-3-flash-preview");
+                      } else {
+                        setDecoderModel(ollamaDecoderModels[0] || "gemma4:e4b");
+                      }
+                    }}
+                  >
+                    <option value="gemini">Gemini</option>
+                    <option value="ollama">Ollama</option>
+                  </select>
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Decoder Model</label>
+                  {decoderProvider === "gemini" ? (
+                    <select className="form-select" value={decoderModel} onChange={(e) => setDecoderModel(e.target.value)}>
+                      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                      <option value="gemini-2.5-flash-preview-05-20">gemini-2.5-flash-preview-05-20</option>
+                    </select>
+                  ) : (
+                    <>
+                      <select className="form-select" value={decoderModel} onChange={(e) => setDecoderModel(e.target.value)}>
+                        {ollamaDecoderModels.length > 0 ? (
+                          ollamaDecoderModels.map((m) => <option key={m} value={m}>{m}</option>)
+                        ) : (
+                          <option value="gemma4:e4b">gemma4:e4b</option>
+                        )}
+                      </select>
+                      <div style={{ marginTop: "0.4rem", display: "flex", gap: "0.5rem" }}>
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={loadModelCatalog}>
+                          Refresh Ollama Models
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -406,6 +480,33 @@ export default function CreateEntryPage() {
             {/* Knowledge Base search */}
             <div className="card">
               <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "0.75rem" }}>📚 Knowledge Base Search</h3>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Embedding Provider</label>
+                  <select
+                    className="form-select"
+                    value={vectorProvider}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setVectorProvider(next);
+                      setVectorModel(next === "gemini" ? "gemini-embedding-001" : "granite-embedding:278m");
+                    }}
+                  >
+                    <option value="gemini">Gemini</option>
+                    <option value="ollama">Ollama</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Embedding Model</label>
+                  <select className="form-select" value={vectorModel} onChange={(e) => setVectorModel(e.target.value)}>
+                    {vectorProvider === "gemini" ? (
+                      <option value="gemini-embedding-001">Gemini Embedding</option>
+                    ) : (
+                      <option value="granite-embedding:278m">Granite Embedding 278m</option>
+                    )}
+                  </select>
+                </div>
+              </div>
               <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
                 <input className="form-input" placeholder="Search vector store..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSearch()} />
                 <button className="btn btn-secondary" onClick={handleSearch}>Search</button>

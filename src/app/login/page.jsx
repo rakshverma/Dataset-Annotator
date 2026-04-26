@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { login } from "@/lib/api";
 
 export default function LoginPage() {
@@ -68,7 +69,7 @@ export default function LoginPage() {
         </form>
 
         <p style={{ textAlign: "center", marginTop: "1.25rem", fontSize: "0.82rem", color: "#9CA3AF" }}>
-          Contact your admin for account access.
+          New here? <Link href="/create-account">Create an account</Link>
         </p>
       </div>
     </div>

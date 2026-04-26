@@ -1,9 +1,10 @@
-import { query, queryOne } from "@/lib/db";
+import { initTables, query, queryOne } from "@/lib/db";
 import { getUser, unauthorized } from "@/lib/auth";
 
 export async function GET(request, { params }) {
   const user = await getUser(request);
   if (!user) return unauthorized();
+  await initTables();
 
   const { id } = await params;
   const example = await queryOne("SELECT * FROM dataset_examples WHERE id = $1", [id]);
@@ -29,6 +30,7 @@ export async function GET(request, { params }) {
 export async function PUT(request, { params }) {
   const user = await getUser(request);
   if (!user) return unauthorized();
+  await initTables();
 
   const { id } = await params;
   const body = await request.json();
@@ -69,6 +71,7 @@ export async function PUT(request, { params }) {
 export async function DELETE(request, { params }) {
   const user = await getUser(request);
   if (!user) return unauthorized();
+  await initTables();
 
   const { id } = await params;
   await query("DELETE FROM dataset_examples WHERE id = $1", [id]);

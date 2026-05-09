@@ -2,7 +2,7 @@ import { getUser, unauthorized } from "@/lib/auth";
 
 const GEMINI_DECODER_MODELS = [
   "gemini-3-flash-preview",
-  "gemini-2.5-flash-preview-05-20",
+  "gemini-2.5-flash",
 ];
 
 const GEMINI_EMBED_MODELS = [

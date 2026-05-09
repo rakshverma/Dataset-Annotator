@@ -1,5 +1,6 @@
 import { initTables, query, queryOne } from "@/lib/db";
 import { getUser, unauthorized } from "@/lib/auth";
+import { deriveTopicCoverage } from "@/lib/topics";
 
 export async function GET(request, { params }) {
   const user = await getUser(request);
@@ -41,6 +42,16 @@ export async function PUT(request, { params }) {
 
   const now = new Date().toISOString();
   const username = user.sub;
+  const normalizedConceptCoverage = deriveTopicCoverage({
+    concepts: [...(content?.concept_coverage || []), ...concept_coverage],
+    question: content?.question,
+    grounding: content?.grounding || [],
+    sources,
+  });
+  const normalizedContent = {
+    ...(content || {}),
+    concept_coverage: normalizedConceptCoverage,
+  };
 
   const maxVersion = await queryOne(
     "SELECT COALESCE(MAX(version), 0) as max_v FROM dataset_states WHERE example_id = $1",
@@ -51,7 +62,7 @@ export async function PUT(request, { params }) {
   const stResult = await query(
     `INSERT INTO dataset_states (example_id, version, content_json, reasoning_trace, ai_conclusion, change_note, modified_by, modified_at, model_name, concept_coverage)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
-    [id, nextVersion, JSON.stringify(content), reasoning_trace || "", ai_conclusion || "", change_note || "", username, now, model_name || "manual_edit", JSON.stringify(concept_coverage)]
+    [id, nextVersion, JSON.stringify(normalizedContent), reasoning_trace || "", ai_conclusion || "", change_note || "", username, now, model_name || "manual_edit", JSON.stringify(normalizedConceptCoverage)]
   );
   const stateId = stResult[0].id;
 
@@ -63,6 +74,17 @@ export async function PUT(request, { params }) {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [id, stateId, src.source_type || "unknown", src.source_name || "", src.source_ref || "", src.source_text || "", username, now]
     );
+  }
+
+  for (const concept of normalizedConceptCoverage) {
+    if (concept.trim()) {
+      await query(
+        `INSERT INTO concept_registry (concept, usage_count, last_used_at)
+         VALUES ($1, 1, $2)
+         ON CONFLICT (concept) DO UPDATE SET usage_count = concept_registry.usage_count + 1, last_used_at = $2`,
+        [concept.trim(), now]
+      );
+    }
   }
 
   return Response.json({ version: nextVersion, stateId });

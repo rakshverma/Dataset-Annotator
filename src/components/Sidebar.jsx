@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { logout, getUsername } from "@/lib/api";
 
 const NAV_ITEMS = [
@@ -14,7 +15,11 @@ const NAV_ITEMS = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const username = getUsername();
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    setUsername(getUsername());
+  }, []);
 
   return (
     <aside className="sidebar">

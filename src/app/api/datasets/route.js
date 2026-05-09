@@ -1,5 +1,6 @@
 import { initTables, query, queryOne } from "@/lib/db";
 import { getUser, unauthorized } from "@/lib/auth";
+import { deriveTopicCoverage } from "@/lib/topics";
 
 export async function GET(request) {
   const user = await getUser(request);
@@ -44,6 +45,16 @@ export async function POST(request) {
 
     const now = new Date().toISOString();
     const username = user.sub;
+    const normalizedConceptCoverage = deriveTopicCoverage({
+      concepts: [...(content?.concept_coverage || []), ...concept_coverage],
+      question: content?.question,
+      grounding: content?.grounding || [],
+      sources,
+    });
+    const normalizedContent = {
+      ...(content || {}),
+      concept_coverage: normalizedConceptCoverage,
+    };
 
     const exResult = await query(
       `INSERT INTO dataset_examples (title, account_label, task_type, created_by, created_at, updated_at)
@@ -55,7 +66,7 @@ export async function POST(request) {
     const stResult = await query(
       `INSERT INTO dataset_states (example_id, version, content_json, reasoning_trace, ai_conclusion, change_note, modified_by, modified_at, model_name, concept_coverage)
        VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-      [exampleId, JSON.stringify(content), reasoning_trace || "", ai_conclusion || "", change_note || "", username, now, model_name || "manual", JSON.stringify(concept_coverage)]
+      [exampleId, JSON.stringify(normalizedContent), reasoning_trace || "", ai_conclusion || "", change_note || "", username, now, model_name || "manual", JSON.stringify(normalizedConceptCoverage)]
     );
     const stateId = stResult[0].id;
 
@@ -68,7 +79,7 @@ export async function POST(request) {
     }
 
     // Concept registry
-    for (const concept of concept_coverage) {
+    for (const concept of normalizedConceptCoverage) {
       if (concept.trim()) {
         await query(
           `INSERT INTO concept_registry (concept, usage_count, last_used_at)

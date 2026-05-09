@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { apiJson, isLoggedIn, getUsername } from "@/lib/api";
+import { deriveTopicCoverage } from "@/lib/topics";
 
 export default function CreateEntryPage() {
   const router = useRouter();
@@ -34,6 +35,18 @@ export default function CreateEntryPage() {
   const [decoderModel, setDecoderModel] = useState("gemini-3-flash-preview");
   const [ollamaDecoderModels, setOllamaDecoderModels] = useState([]);
 
+  // AI-driven batch fields
+  const [drivenMode, setDrivenMode] = useState("stackoverflow");
+  const [drivenHeading, setDrivenHeading] = useState("");
+  const [drivenCount, setDrivenCount] = useState(3);
+  const [drivenQtype, setDrivenQtype] = useState(1);
+  const [drivenDocText, setDrivenDocText] = useState("");
+  const [drivenDocName, setDrivenDocName] = useState("");
+  const [drivenProgress, setDrivenProgress] = useState("");
+  const [drivenDrafts, setDrivenDrafts] = useState([]);
+  const [drivenSources, setDrivenSources] = useState([]);
+  const [drivenSavedIds, setDrivenSavedIds] = useState([]);
+
   // KB search
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
@@ -44,6 +57,7 @@ export default function CreateEntryPage() {
   const [soQuery, setSoQuery] = useState("");
   const [soTags, setSoTags] = useState("");
   const [soResults, setSoResults] = useState([]);
+  const [soPlan, setSoPlan] = useState(null);
   const [soLoading, setSoLoading] = useState(false);
 
   // All selected sources
@@ -131,6 +145,25 @@ export default function CreateEntryPage() {
     return modelAnswer.trim();
   }
 
+  function isStackOverflowSource(source) {
+    return Boolean(source?.source_type?.startsWith("so_"));
+  }
+
+  function getNormalizedConceptList(nextConcepts = currentConcepts, nextQuestion = question) {
+    return deriveTopicCoverage({
+      concepts: nextConcepts,
+      question: nextQuestion,
+      sources: selectedSources,
+    });
+  }
+
+  function getSourceChipLabel(source) {
+    if (source?.source_type === "so_top_answer") return "SO Answer";
+    if (source?.source_type === "so_related_question") return "SO Related";
+    if (source?.source_type === "so_relevant_question") return "SO Question";
+    return "KB";
+  }
+
   function resetEntryFields() {
     setDatasetId("");
     setQuestion("");
@@ -145,7 +178,87 @@ export default function CreateEntryPage() {
     setReasoning("");
     setConcepts("");
     setSelectedSources([]);
+    setSoResults([]);
+    setSoPlan(null);
     setAiModelUsed("manual_entry");
+  }
+
+  function applyDraftToForm(draft, sources = [], modelLabel = aiModelUsed) {
+    setDatasetId(draft.id || "");
+    setQtype(draft.qtype ?? 1);
+    setQuestion(draft.question || "");
+    setModelAnswer(draft.answer || "");
+    setAnnotatorVerdict("");
+    setAnnotatorAnswer("");
+    setSolution(draft.solution || "");
+    setReasoning(draft.reasoning_thought || "");
+    setSelectedSources(sources);
+
+    const aiConcepts = Array.isArray(draft.concept_coverage) ? draft.concept_coverage : [];
+    const mergedTopics = deriveTopicCoverage({
+      concepts: [...currentConcepts, ...aiConcepts],
+      question: draft.question || aiObjective || drivenHeading,
+      grounding: draft.grounding || [],
+      sources,
+    });
+    setConcepts(mergedTopics.join(", "));
+
+    if (draft.qtype === 0) {
+      setChoiceA(draft.A || draft.choices?.[0] || "");
+      setChoiceB(draft.B || draft.choices?.[1] || "");
+      setChoiceC(draft.C || draft.choices?.[2] || "");
+      setChoiceD(draft.D || draft.choices?.[3] || "");
+    } else {
+      setChoiceA("");
+      setChoiceB("");
+      setChoiceC("");
+      setChoiceD("");
+    }
+
+    setTab("manual");
+    setAiModelUsed(modelLabel);
+  }
+
+  function buildContentFromDraft(draft, sources = []) {
+    const draftQtype = Number(draft.qtype ?? 1);
+    const choices = draftQtype === 0
+      ? [
+        draft.A || draft.choices?.[0] || "",
+        draft.B || draft.choices?.[1] || "",
+        draft.C || draft.choices?.[2] || "",
+        draft.D || draft.choices?.[3] || "",
+      ]
+      : [];
+    const conceptList = deriveTopicCoverage({
+      concepts: Array.isArray(draft.concept_coverage) ? draft.concept_coverage : [],
+      question: draft.question,
+      grounding: draft.grounding || [],
+      sources,
+    });
+
+    return {
+      id: String(draft.id || "auto").trim(),
+      question: String(draft.question || "").trim(),
+      qtype: draftQtype,
+      choices,
+      A: choices[0] || "",
+      B: choices[1] || "",
+      C: choices[2] || "",
+      D: choices[3] || "",
+      answer: String(draft.answer || "").trim(),
+      model_answer: String(draft.answer || "").trim(),
+      annotator_verdict: "yes",
+      annotator_answer: "",
+      answer_source: "model_approved",
+      solution: String(draft.solution || "").trim(),
+      reasoning_thought: String(draft.reasoning_thought || "").trim(),
+      concept_coverage: conceptList,
+      grounding: sources.map((s) => ({
+        type: s.source_type,
+        title: s.source_name,
+        url: s.source_ref,
+      })),
+    };
   }
 
   /* ── Concept Picker Component ──────── */
@@ -153,11 +266,11 @@ export default function CreateEntryPage() {
     return (
       <div className="card">
         <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-          🏷️ Concept Registry
+          🏷️ Topic Registry
         </h3>
         <p style={{ fontSize: "0.82rem", color: "#6B7280", marginBottom: "0.5rem" }}>
-          {conceptRegistry.length} known concept{conceptRegistry.length !== 1 ? "s" : ""}.
-          Click to add/remove. {tab === "ai" && "Full registry is sent to AI to avoid repetition."}
+          {conceptRegistry.length} known topic{conceptRegistry.length !== 1 ? "s" : ""}.
+          Click to add/remove. {tab === "ai" && "Only broad topics are sent to AI to avoid repetition."}
         </p>
 
         {currentConcepts.length > 0 && (
@@ -175,7 +288,7 @@ export default function CreateEntryPage() {
 
         <input
           className="form-input"
-          placeholder="Filter concepts..."
+          placeholder="Filter topics..."
           value={conceptFilter}
           onChange={(e) => setConceptFilter(e.target.value)}
           style={{ marginBottom: "0.5rem" }}
@@ -200,7 +313,7 @@ export default function CreateEntryPage() {
             })
           ) : (
             <span style={{ fontSize: "0.82rem", color: "#9CA3AF" }}>
-              {conceptRegistry.length === 0 ? "No concepts yet — they'll appear after saving entries." : "No matches."}
+              {conceptRegistry.length === 0 ? "No saved topics yet — they'll appear after saving entries." : "No matches."}
             </span>
           )}
         </div>
@@ -250,11 +363,12 @@ export default function CreateEntryPage() {
     if (!soQuery.trim()) return;
     setSoLoading(true);
     try {
-      const results = await apiJson("/api/stackoverflow", {
+      const data = await apiJson("/api/stackoverflow", {
         method: "POST",
-        body: JSON.stringify({ query: soQuery, tags: soTags, max_questions: 5 }),
+        body: JSON.stringify({ query: soQuery, tags: soTags, max_questions: 5, max_answers_per_question: 2 }),
       });
-      setSoResults(results);
+      setSoPlan(data.search_plan || null);
+      setSoResults(data.results || []);
     } catch (err) {
       setMsg({ type: "error", text: err.message });
     } finally {
@@ -289,41 +403,175 @@ export default function CreateEntryPage() {
           provider: decoderProvider,
           model: decoderModel,
           grounding_sources: selectedSources,
-          existing_concepts: conceptRegistry,   // ALL concepts always sent
-          selected_concepts: currentConcepts,    // User-picked ones
+          existing_concepts: conceptRegistry,
+          selected_concepts: getNormalizedConceptList(currentConcepts, aiObjective),    // User-picked topics
         }),
       });
       if (data.error) throw new Error(data.error);
 
-      const draft = data.draft;
-      setDatasetId(draft.id || "");
-      setQtype(draft.qtype ?? 1);
-      setQuestion(draft.question || "");
-      setModelAnswer(draft.answer || "");
-      setAnnotatorVerdict("");
-      setAnnotatorAnswer("");
-      setSolution(draft.solution || "");
-      setReasoning(draft.reasoning_thought || "");
-
-      // Merge existing selected + AI-generated
-      const aiConcepts = Array.isArray(draft.concept_coverage) ? draft.concept_coverage : [];
-      const merged = [...new Set([...currentConcepts, ...aiConcepts])];
-      setConcepts(merged.join(", "));
-
-      if (draft.qtype === 0) {
-        setChoiceA(draft.A || draft.choices?.[0] || "");
-        setChoiceB(draft.B || draft.choices?.[1] || "");
-        setChoiceC(draft.C || draft.choices?.[2] || "");
-        setChoiceD(draft.D || draft.choices?.[3] || "");
-      } else {
-        setChoiceA("");
-        setChoiceB("");
-        setChoiceC("");
-        setChoiceD("");
-      }
-      setTab("manual");
-      setAiModelUsed(`${data.provider || decoderProvider}:${data.model || decoderModel}`);
+      applyDraftToForm(data.draft, selectedSources, `${data.provider || decoderProvider}:${data.model || decoderModel}`);
       setMsg({ type: "success", text: `Draft generated with ${data.model}. Review and save below.` });
+    } catch (err) {
+      setMsg({ type: "error", text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDrivenDocUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setDrivenDocName(file.name);
+    setDrivenProgress("Reading document...");
+    try {
+      const text = await file.text();
+      setDrivenDocText(text.slice(0, 30000));
+      setDrivenProgress(`${file.name} loaded (${Math.round(text.length / 1000)}k chars).`);
+    } catch (err) {
+      setDrivenProgress("");
+      setMsg({ type: "error", text: `Could not read document: ${err.message}` });
+    }
+  }
+
+  async function handleAIDrivenGenerate() {
+    const count = Math.max(1, Math.min(10, Number(drivenCount) || 1));
+    const heading = drivenHeading.trim();
+    if (!heading) { setMsg({ type: "error", text: "Heading is required." }); return; }
+    if (drivenMode === "document" && !drivenDocText.trim()) {
+      setMsg({ type: "error", text: "Upload a text, markdown, HTML, JSON, or log document first." });
+      return;
+    }
+
+    setLoading(true);
+    setDrivenDrafts([]);
+    setDrivenSources([]);
+    setDrivenSavedIds([]);
+    setMsg({ type: "", text: "" });
+    setDrivenProgress("Preparing sources...");
+
+    try {
+      let sources = [];
+
+      if (drivenMode === "stackoverflow") {
+        setDrivenProgress("Fetching Stack Overflow questions and top answers...");
+        const soData = await apiJson("/api/stackoverflow", {
+          method: "POST",
+          body: JSON.stringify({
+            query: heading,
+            tags: currentConcepts.join(", "),
+            max_questions: Math.max(5, count + 2),
+            max_answers_per_question: 2,
+          }),
+        });
+
+        sources = (soData.results || []).flatMap((so) => [
+          so.question_source,
+          ...(so.top_answers || []).map((answer) => answer.source),
+        ]).filter(Boolean).slice(0, 14);
+        setSoQuery(heading);
+        setSoPlan(soData.search_plan || null);
+        setSoResults(soData.results || []);
+      } else {
+        sources = [{
+          source_type: "uploaded_document",
+          source_name: drivenDocName || heading,
+          source_ref: `upload:${drivenDocName || "document"}`,
+          source_text: drivenDocText.slice(0, 18000),
+        }];
+      }
+
+      setDrivenSources(sources);
+      setSelectedSources(sources);
+
+      const generated = [];
+      for (let i = 0; i < count; i += 1) {
+        setDrivenProgress(`Generating question ${i + 1} of ${count}...`);
+        const objective = [
+          `Heading: ${heading}`,
+          `Create dataset question ${i + 1} of ${count}.`,
+          drivenMode === "stackoverflow"
+            ? "Use the Stack Overflow direct and related questions plus top answers as grounding."
+            : "Use the uploaded document as grounding.",
+          "Make this question distinct from the other requested questions and keep it relevant to ITOps operations.",
+        ].join("\n");
+
+        const data = await apiJson("/api/generate", {
+          method: "POST",
+          body: JSON.stringify({
+            objective,
+            qtype: drivenQtype,
+            provider: decoderProvider,
+            model: decoderModel,
+            grounding_sources: sources,
+            existing_concepts: conceptRegistry,
+            selected_concepts: getNormalizedConceptList(currentConcepts, heading),
+          }),
+        });
+        if (data.error) throw new Error(data.error);
+        generated.push({
+          draft: data.draft,
+          provider: data.provider || decoderProvider,
+          model: data.model || decoderModel,
+          sources,
+        });
+      }
+
+      setDrivenDrafts(generated);
+      setDrivenProgress(`Generated ${generated.length} draft${generated.length !== 1 ? "s" : ""}.`);
+      if (generated[0]) {
+        applyDraftToForm(generated[0].draft, generated[0].sources, `${generated[0].provider}:${generated[0].model}`);
+      }
+      setMsg({ type: "success", text: `AI-driven flow generated ${generated.length} draft${generated.length !== 1 ? "s" : ""}. Review one below, or pick another draft from the AI Driven tab.` });
+    } catch (err) {
+      setDrivenProgress("");
+      setMsg({ type: "error", text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveAllDrivenDrafts() {
+    if (drivenDrafts.length === 0) {
+      setMsg({ type: "error", text: "Generate AI-driven drafts first." });
+      return;
+    }
+
+    setLoading(true);
+    setMsg({ type: "", text: "" });
+    setDrivenProgress(`Saving ${drivenDrafts.length} draft${drivenDrafts.length !== 1 ? "s" : ""}...`);
+
+    try {
+      const saved = [];
+      for (let index = 0; index < drivenDrafts.length; index += 1) {
+        const item = drivenDrafts[index];
+        const content = buildContentFromDraft(item.draft, item.sources);
+        if (!content.question || !content.answer || !content.solution) {
+          throw new Error(`Draft ${index + 1} is missing question, answer, or solution.`);
+        }
+
+        const response = await apiJson("/api/datasets", {
+          method: "POST",
+          body: JSON.stringify({
+            title: `${content.id || `AI-driven-${index + 1}`} | ${content.question.slice(0, 60)}`,
+            account_label: getUsername(),
+            task_type: taskType,
+            content,
+            reasoning_trace: content.reasoning_thought,
+            ai_conclusion: content.solution,
+            change_note: `AI-driven batch creation from ${drivenMode === "document" ? "uploaded document" : "Stack Overflow retrieval"}`,
+            model_name: `${item.provider}:${item.model}`,
+            sources: item.sources,
+            concept_coverage: content.concept_coverage,
+          }),
+        });
+        saved.push(response.id);
+        setDrivenProgress(`Saved ${saved.length} of ${drivenDrafts.length} drafts...`);
+      }
+
+      setDrivenSavedIds(saved);
+      setDrivenProgress(`Saved ${saved.length} draft${saved.length !== 1 ? "s" : ""}.`);
+      setMsg({ type: "success", text: `Saved all AI-driven drafts: ${saved.map((id) => `#${id}`).join(", ")}` });
+      apiJson("/api/concepts").then(setConceptRegistry).catch(() => {});
     } catch (err) {
       setMsg({ type: "error", text: err.message });
     } finally {
@@ -352,7 +600,7 @@ export default function CreateEntryPage() {
 
     setLoading(true);
     try {
-      const conceptList = currentConcepts;
+      const conceptList = getNormalizedConceptList();
       const resolvedAnswer = getResolvedAnswer();
       const content = {
         id: datasetId.trim(),
@@ -427,6 +675,9 @@ export default function CreateEntryPage() {
           <button className={`tab ${tab === "ai" ? "active" : ""}`} onClick={() => setTab("ai")}>
             AI Assisted
           </button>
+          <button className={`tab ${tab === "driven" ? "active" : ""}`} onClick={() => setTab("driven")}>
+            AI Driven
+          </button>
         </div>
 
         <div className="card" style={{ background: "#EFF6FF", borderColor: "#BFDBFE", marginBottom: "1rem" }}>
@@ -443,6 +694,236 @@ export default function CreateEntryPage() {
         </div>
 
         {msg.text && <div className={`alert alert-${msg.type}`}>{msg.text}</div>}
+
+        {tab === "driven" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginBottom: "1.5rem" }}>
+            <div className="card">
+              <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "1rem" }}>AI Driven Generation</h3>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Source Mode</label>
+                  <select className="form-select" value={drivenMode} onChange={(e) => setDrivenMode(e.target.value)}>
+                    <option value="stackoverflow">Stack Overflow topics</option>
+                    <option value="document">Uploaded document</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Number of Questions</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={drivenCount}
+                    onChange={(e) => setDrivenCount(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Heading</label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. Kubernetes pod eviction troubleshooting"
+                  value={drivenHeading}
+                  onChange={(e) => setDrivenHeading(e.target.value)}
+                />
+              </div>
+
+              {drivenMode === "document" && (
+                <div className="form-group">
+                  <label className="form-label">Upload Document</label>
+                  <input
+                    className="form-input"
+                    type="file"
+                    accept=".txt,.md,.markdown,.json,.csv,.log,.html,.htm"
+                    onChange={handleDrivenDocUpload}
+                  />
+                  {drivenDocName && (
+                    <div style={{ fontSize: "0.78rem", color: "#6B7280", marginTop: "0.35rem" }}>
+                      Loaded: {drivenDocName}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Question Type</label>
+                  <select className="form-select" value={drivenQtype} onChange={(e) => setDrivenQtype(Number(e.target.value))}>
+                    <option value={0}>MCQ</option>
+                    <option value={1}>Open QA</option>
+                    <option value={2}>Multi-step Reasoning</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Decoder Provider</label>
+                  <select
+                    className="form-select"
+                    value={decoderProvider}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setDecoderProvider(next);
+                      setDecoderModel(next === "gemini" ? "gemini-3-flash-preview" : (ollamaDecoderModels[0] || "gemma4:e4b"));
+                    }}
+                  >
+                    <option value="gemini">Gemini</option>
+                    <option value="ollama">Ollama</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Decoder Model</label>
+                {decoderProvider === "gemini" ? (
+                  <select className="form-select" value={decoderModel} onChange={(e) => setDecoderModel(e.target.value)}>
+                    <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                  </select>
+                ) : (
+                  <select className="form-select" value={decoderModel} onChange={(e) => setDecoderModel(e.target.value)}>
+                    {ollamaDecoderModels.length > 0 ? (
+                      ollamaDecoderModels.map((m) => <option key={m} value={m}>{m}</option>)
+                    ) : (
+                      <option value="gemma4:e4b">gemma4:e4b</option>
+                    )}
+                  </select>
+                )}
+              </div>
+
+              <button className="btn btn-primary btn-full" onClick={handleAIDrivenGenerate} disabled={loading}>
+                {loading ? <span className="spinner" /> : "Run AI Driven Flow"}
+              </button>
+
+              {drivenProgress && (
+                <div style={{ fontSize: "0.82rem", color: "#6B7280", marginTop: "0.75rem" }}>
+                  {drivenProgress}
+                </div>
+              )}
+            </div>
+
+            {drivenSources.length > 0 && (
+              <div className="card" style={{ background: "#FFFBEB", borderColor: "#FDE68A" }}>
+                <h4 style={{ fontSize: "0.88rem", fontWeight: 600, marginBottom: "0.5rem" }}>{drivenSources.length} source(s) gathered</h4>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                  {drivenSources.map((s, i) => (
+                    <span key={`${s.source_ref}-${i}`} className={`pill ${isStackOverflowSource(s) ? "pill-amber" : "pill-blue"}`}>
+                      {getSourceChipLabel(s)}: {s.source_name?.slice(0, 46)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {drivenDrafts.length > 0 && (
+              <div className="card">
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "center", marginBottom: "0.75rem" }}>
+                  <h3 style={{ fontSize: "1rem", fontWeight: 600 }}>Generated Drafts</h3>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={handleSaveAllDrivenDrafts} disabled={loading}>
+                    {loading ? <span className="spinner" /> : "Save All Drafts"}
+                  </button>
+                </div>
+                {drivenSavedIds.length > 0 && (
+                  <div className="alert alert-success" style={{ marginBottom: "0.75rem" }}>
+                    Saved examples: {drivenSavedIds.map((id) => `#${id}`).join(", ")}
+                  </div>
+                )}
+                <div style={{ display: "grid", gap: "0.75rem" }}>
+                  {drivenDrafts.map((item, index) => (
+                    <div key={index} className="card card-compact" style={{ background: "#F9FAFB" }}>
+                      <div style={{ display: "grid", gap: "0.65rem" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "start" }}>
+                          <div style={{ fontSize: "0.82rem", fontWeight: 600, marginBottom: "0.2rem" }}>
+                            Draft {index + 1} · {item.model}
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => applyDraftToForm(item.draft, item.sources, `${item.provider}:${item.model}`)}
+                            style={{ flexShrink: 0 }}
+                          >
+                            Review
+                          </button>
+                        </div>
+
+                        <div>
+                          <div className="form-label" style={{ marginBottom: "0.2rem" }}>Question</div>
+                          <div style={{ fontSize: "0.86rem", color: "#111827" }}>{item.draft.question}</div>
+                        </div>
+
+                        {Number(item.draft.qtype ?? drivenQtype) === 0 && (
+                          <div>
+                            <div className="form-label" style={{ marginBottom: "0.2rem" }}>Choices</div>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.35rem" }}>
+                              {["A", "B", "C", "D"].map((label, choiceIndex) => (
+                                <div key={label} className="card card-compact" style={{ background: "#FFFFFF", padding: "0.55rem 0.75rem", fontSize: "0.8rem" }}>
+                                  <strong>{label}.</strong> {item.draft[label] || item.draft.choices?.[choiceIndex] || ""}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <div>
+                          <div className="form-label" style={{ marginBottom: "0.2rem" }}>Answer</div>
+                          <div style={{ fontSize: "0.84rem", color: "#065F46", whiteSpace: "pre-wrap" }}>
+                            {item.draft.answer}
+                          </div>
+                        </div>
+
+                        {item.draft.solution && (
+                          <div>
+                            <div className="form-label" style={{ marginBottom: "0.2rem" }}>Solution</div>
+                            <div style={{ fontSize: "0.82rem", color: "#374151", whiteSpace: "pre-wrap" }}>
+                              {item.draft.solution}
+                            </div>
+                          </div>
+                        )}
+
+                        {item.draft.reasoning_thought && (
+                          <details>
+                            <summary style={{ cursor: "pointer", fontSize: "0.8rem", fontWeight: 600, color: "#6B7280" }}>
+                              Reasoning
+                            </summary>
+                            <div style={{ fontSize: "0.8rem", color: "#374151", whiteSpace: "pre-wrap", marginTop: "0.35rem" }}>
+                              {item.draft.reasoning_thought}
+                            </div>
+                          </details>
+                        )}
+
+                        {item.draft.concept_coverage?.length > 0 && (
+                          <div>
+                            <div className="form-label" style={{ marginBottom: "0.2rem" }}>Topics</div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                              {item.draft.concept_coverage.map((topic) => (
+                                <span key={topic} className="pill pill-green">{topic}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {item.sources?.length > 0 && (
+                          <details>
+                            <summary style={{ cursor: "pointer", fontSize: "0.8rem", fontWeight: 600, color: "#6B7280" }}>
+                              Sources picked ({item.sources.length})
+                            </summary>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem", marginTop: "0.45rem" }}>
+                              {item.sources.map((source, sourceIndex) => (
+                                <span key={`${source.source_ref}-${sourceIndex}`} className={`pill ${isStackOverflowSource(source) ? "pill-amber" : "pill-blue"}`}>
+                                  {getSourceChipLabel(source)}: {source.source_name?.slice(0, 50)}
+                                </span>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {tab === "ai" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem", marginBottom: "1.5rem" }}>
@@ -495,7 +976,7 @@ export default function CreateEntryPage() {
                   {decoderProvider === "gemini" ? (
                     <select className="form-select" value={decoderModel} onChange={(e) => setDecoderModel(e.target.value)}>
                       <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
-                      <option value="gemini-2.5-flash-preview-05-20">gemini-2.5-flash-preview-05-20</option>
+                      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                     </select>
                   ) : (
                     <>
@@ -523,10 +1004,10 @@ export default function CreateEntryPage() {
             {/* Stack Overflow Ground Truth */}
             <div className="card">
               <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "0.75rem" }}>
-                🔗 Stack Overflow Ground Truth
+                🔗 Model-Guided Stack Overflow Retrieval
               </h3>
               <p style={{ fontSize: "0.82rem", color: "#6B7280", marginBottom: "0.75rem" }}>
-                Search Stack Overflow for authoritative Q&A to ground AI generation.
+                Gemini expands the query, fetches direct and related Stack Overflow questions, and lets you select either question context or top answers.
               </p>
               <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
                 <input
@@ -545,32 +1026,105 @@ export default function CreateEntryPage() {
                   style={{ width: 140 }}
                 />
                 <button className="btn btn-secondary" onClick={handleSOSearch} disabled={soLoading}>
-                  {soLoading ? <span className="spinner" /> : "Search"}
+                  {soLoading ? <span className="spinner" /> : "Search with Model"}
                 </button>
               </div>
 
+              {soPlan && (
+                <div className="card card-compact" style={{ marginBottom: "0.75rem", background: "#F9FAFB" }}>
+                  <div style={{ fontSize: "0.82rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                    Search plan {soPlan.model_assisted ? "(model-assisted)" : "(fallback)"}
+                  </div>
+                  <div style={{ fontSize: "0.78rem", color: "#6B7280", marginBottom: "0.35rem" }}>
+                    {soPlan.rationale}
+                  </div>
+                  {soPlan.queries?.length > 0 && (
+                    <div style={{ marginBottom: "0.25rem" }}>
+                      <span className="form-label" style={{ marginBottom: "0.2rem" }}>Queries</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                        {soPlan.queries.map((plannedQuery) => <span key={plannedQuery} className="pill pill-blue">{plannedQuery}</span>)}
+                      </div>
+                    </div>
+                  )}
+                  {soPlan.tags?.length > 0 && (
+                    <div>
+                      <span className="form-label" style={{ marginBottom: "0.2rem" }}>Tags</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                        {soPlan.tags.map((tag) => <span key={tag} className="pill pill-gray">{tag}</span>)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {soResults.length > 0 && (
                 <div style={{ maxHeight: 280, overflowY: "auto" }}>
-                  {soResults.map((so, i) => {
-                    const sel = selectedSources.find((s) => s.source_ref === so.source_ref);
+                  {soResults.map((so) => {
+                    const questionSelected = selectedSources.find((s) => s.source_ref === so.question_source?.source_ref);
                     return (
-                      <div
-                        key={i}
-                        className="card card-compact"
-                        style={{ marginBottom: "0.4rem", cursor: "pointer", background: sel ? "#FFF7ED" : undefined, borderColor: sel ? "#F97316" : undefined }}
-                        onClick={() => toggleSOSource(so)}
-                      >
+                      <div key={so.question_id} className="card card-compact" style={{ marginBottom: "0.55rem", background: so.is_related ? "#FFF7ED" : "#F9FAFB" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem" }}>
-                          <strong style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{so.source_name}</strong>
+                          <strong style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{so.title}</strong>
                           <div style={{ display: "flex", gap: "0.35rem", flexShrink: 0 }}>
-                            <span className="pill pill-amber">▲ {so.score}</span>
+                            <span className={`pill ${so.is_related ? "pill-amber" : "pill-blue"}`}>{so.is_related ? "Related" : "Direct"}</span>
+                            <span className="pill pill-amber">▲ {so.question_score}</span>
                             <span className="pill pill-green">{so.answer_count} answers</span>
                           </div>
                         </div>
                         <div style={{ fontSize: "0.78rem", color: "#6B7280", marginTop: "0.15rem" }}>
                           {so.tags?.map((t, j) => <span key={j} className="pill pill-gray" style={{ marginRight: 2 }}>{t}</span>)}
                         </div>
-                        {sel && <div style={{ fontSize: "0.78rem", color: "#F97316", fontWeight: 600, marginTop: "0.25rem" }}>✓ Selected as ground truth</div>}
+                        {so.relevance_reason && (
+                          <div style={{ fontSize: "0.78rem", color: "#6B7280", marginTop: "0.3rem" }}>
+                            {so.relevance_reason}
+                          </div>
+                        )}
+                        <div style={{ fontSize: "0.78rem", color: "#374151", marginTop: "0.35rem" }}>
+                          {so.preview_text}
+                          {so.preview_text ? "…" : ""}
+                        </div>
+                        <div style={{ marginTop: "0.45rem", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem", flexWrap: "wrap" }}>
+                          <a href={so.link} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm">
+                            Open Question
+                          </a>
+                          <button
+                            type="button"
+                            className={`btn btn-sm ${questionSelected ? "btn-primary" : "btn-secondary"}`}
+                            onClick={() => toggleSOSource(so.question_source)}
+                          >
+                            {questionSelected ? "Selected Question Context" : "Select Question Context"}
+                          </button>
+                        </div>
+
+                        {so.top_answers?.length > 0 && (
+                          <div style={{ marginTop: "0.6rem", display: "grid", gap: "0.4rem" }}>
+                            {so.top_answers.map((answer) => {
+                              const answerSelected = selectedSources.find((s) => s.source_ref === answer.source?.source_ref);
+                              return (
+                                <div key={answer.answer_id} className="card card-compact" style={{ background: "#FFFFFF", padding: "0.75rem 0.9rem" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "start", marginBottom: "0.35rem" }}>
+                                    <div style={{ fontSize: "0.8rem", fontWeight: 600 }}>Top Answer</div>
+                                    <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap", justifyContent: "end" }}>
+                                      {answer.is_accepted && <span className="pill pill-green">Accepted</span>}
+                                      <span className="pill pill-amber">▲ {answer.answer_score}</span>
+                                    </div>
+                                  </div>
+                                  <div style={{ fontSize: "0.78rem", color: "#374151", marginBottom: "0.45rem" }}>
+                                    {answer.preview_text}
+                                    {answer.preview_text ? "…" : ""}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className={`btn btn-sm ${answerSelected ? "btn-primary" : "btn-secondary"}`}
+                                    onClick={() => toggleSOSource(answer.source)}
+                                  >
+                                    {answerSelected ? "Selected Top Answer" : "Select Top Answer"}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -637,8 +1191,8 @@ export default function CreateEntryPage() {
                 <h4 style={{ fontSize: "0.88rem", fontWeight: 600, marginBottom: "0.5rem" }}>{selectedSources.length} source(s) selected</h4>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
                   {selectedSources.map((s, i) => (
-                    <span key={i} className={`pill ${s.source_type === "so_ground_truth" ? "pill-amber" : "pill-blue"}`} style={{ cursor: "pointer" }} onClick={() => removeSource(s.source_ref)}>
-                      {s.source_type === "so_ground_truth" ? "SO: " : "KB: "}{s.source_name?.slice(0, 40)} ✕
+                    <span key={i} className={`pill ${isStackOverflowSource(s) ? "pill-amber" : "pill-blue"}`} style={{ cursor: "pointer" }} onClick={() => removeSource(s.source_ref)}>
+                      {getSourceChipLabel(s)}: {s.source_name?.slice(0, 40)} ✕
                     </span>
                   ))}
                 </div>
@@ -776,8 +1330,11 @@ export default function CreateEntryPage() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">Concepts (comma-separated)</label>
+            <label className="form-label">Topics (comma-separated)</label>
             <input className="form-input" value={concepts} onChange={(e) => setConcepts(e.target.value)} placeholder="Kubernetes, pod eviction, resource limits" />
+            <div style={{ fontSize: "0.78rem", color: "#6B7280", marginTop: "0.35rem" }}>
+              Saved topics are normalized to broad reusable labels such as product names or technologies.
+            </div>
           </div>
 
           {/* Concept Registry — always visible in both tabs */}
